@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prawntenna — Dongle Host</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root { --sidebar-width: 280px; }
+        body { font-family: monospace; font-size: 17px; background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; }
+        #header { background: #16213e; padding: 12px 20px; border-bottom: 2px solid #0f3460; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+        #header h1 { font-size: 1.3em; color: #53d769; }
+        #header .info { font-size: 0.9em; color: #888; margin-top: 3px; }
+        #container { display: flex; flex: 1; min-height: 300px; }
+        #main-panel { flex: 1; overflow-y: auto; padding: 12px 15px; }
+        #status-panel { width: calc(var(--sidebar-width) + 32px); background: #16213e; padding: 12px 15px; border-left: 2px solid #0f3460; overflow-y: auto; flex-shrink: 0; }
+        #status-panel.collapsed { width: auto; }
+        #status-panel.collapsed #status-items { display: none; }
+        /* Dark slim scrollbars that belong visually to the panel they sit in */
+        * { scrollbar-width: thin; scrollbar-color: #0f3460 transparent; }
+        *::-webkit-scrollbar { width: 8px; height: 8px; }
+        *::-webkit-scrollbar-thumb { background: #0f3460; border-radius: 4px; }
+        *::-webkit-scrollbar-track { background: transparent; }
+        .section-title { color: #53d769; font-size: 1em; margin-bottom: 8px; margin-top: 12px; }
+        .section-title:first-child { margin-top: 0; }
+        .panel-head { display: flex; align-items: center; justify-content: space-between; }
+        .panel-toggle { background: #0f3460; color: #53d769; border: 1px solid #53d769; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 0.85em; padding: 1px 9px; transition: transform 0.2s; }
+        .collapsed .panel-toggle { transform: rotate(-90deg); }
+        .status-item { margin-bottom: 8px; padding: 6px 8px; background: #0f3460; border-radius: 4px; }
+        .status-label { color: #53d769; font-size: 0.9em; margin-bottom: 3px; font-weight: bold; }
+        .status-value { color: #e0e0e0; font-size: 0.95em; }
+        .btn-solid { padding: 3px 8px; background: #53d769; color: #1a1a2e; border: none; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 0.9em; }
+        .btn-solid:hover { background: #3eb852; }
+        .btn-solid:disabled { background: #2a5a35; color: #1a3a2e; cursor: wait; }
+        .btn-outline { padding: 3px 10px; background: #0f3460; color: #53d769; border: 1px solid #53d769; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 0.9em; }
+        .btn-outline:hover { background: #16294e; }
+        .btn-stop { padding: 3px 10px; background: rgba(231,76,60,0.15); color: #e07890; border: 1px solid #e07890; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 0.9em; }
+        .btn-stop:hover { background: rgba(231,76,60,0.3); }
+        .num-input { width: 90px; background: #0f3460; border: 1px solid #53d769; color: #e0e0e0; border-radius: 3px; padding: 3px; font-family: monospace; font-size: 0.95em; }
+        #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%) translateY(20px); background: #16213e; color: #e0e0e0; border: 1px solid #53d769; border-radius: 4px; padding: 8px 14px; font-size: 0.9em; opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none; z-index: 2000; max-width: 90vw; }
+        #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        #toast.error { border-color: #e74c3c; }
+        /* Dongle cards: one per connected device, accent stripe shows state */
+        .dongle-card { margin-bottom: 8px; padding: 10px; background: #0f3460; border-radius: 4px; border-left: 3px solid #444; }
+        .dongle-card.published { border-left-color: #53d769; }
+        .dongle-card.error { border-left-color: #e74c3c; }
+        .dc-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .led { width: 12px; height: 12px; border-radius: 50%; background: #555; flex-shrink: 0; }
+        .led.on { background: #53d769; box-shadow: 0 0 6px #53d769; animation: pulse 2s infinite; }
+        .led.err { background: #e74c3c; box-shadow: 0 0 6px #e74c3c; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .dc-name { font-weight: bold; color: #53d769; }
+        .dc-sub { font-size: 0.8em; color: #888; }
+        .dc-controls { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+        .dc-controls .port-label { font-size: 0.85em; color: #888; }
+        .dc-status { font-size: 0.85em; color: #a8b8d8; margin-top: 6px; }
+        .dc-addr { color: #4da6ff; }
+        .dc-error { font-size: 0.8em; color: #e07890; margin-top: 4px; white-space: pre-wrap; }
+        .dc-hint { font-size: 0.75em; color: #f39c12; margin-top: 3px; }
+        /* Collapsible device details block inside each dongle card */
+        .dc-details { margin-top: 8px; }
+        .dc-details summary { color: #888; font-size: 0.85em; cursor: pointer; }
+        .dc-details summary:hover { color: #53d769; }
+        .dc-meta { margin-top: 6px; background: #16213e; border-radius: 4px; padding: 8px; }
+        .meta-row { display: flex; gap: 10px; font-size: 0.8em; padding: 2px 0; }
+        .meta-key { color: #888; min-width: 120px; flex-shrink: 0; }
+        .meta-val { color: #a8b8d8; word-break: break-all; }
+        .empty { color: #888; padding: 20px; text-align: center; background: #0f3460; border-radius: 4px; line-height: 1.6; }
+        .footer-note { font-size: 0.75em; color: #888; margin-top: 10px; }
+        @media (max-width: 800px) {
+            #container { flex-direction: column; }
+            #status-panel { width: 100%; border-left: none; border-top: 2px solid #0f3460; overflow-y: visible; }
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div>
+            <h1>🦐 Prawntenna</h1>
+            <div class="info">RTL-SDR dongle host — publishes connected dongles as rtl_tcp servers on your LAN</div>
+        </div>
+        <button class="btn-outline" onclick="poll()">🔄 Refresh</button>
+    </div>
+    <div id="container">
+        <div id="main-panel">
+            <div class="section-title">📡 Connected Dongles <span id="dongle-count" style="color:#888;font-size:0.85em;"></span></div>
+            <div id="dongle-list"><div class="empty">Scanning for RTL-SDR dongles...</div></div>
+            <div class="footer-note">Publishing a dongle starts an rtl_tcp server on this host and holds the dongle exclusively until you stop it. A dongle already serving another rtl_tcp (e.g. a system daemon) cannot be published until that one stops.</div>
+        </div>
+        <div id="status-panel">
+            <div class="section-title panel-head" style="margin-bottom:8px;">
+                System Status
+                <button class="panel-toggle" onclick="togglePanel('status-panel')" aria-label="Toggle system status panel">▾</button>
+            </div>
+            <div id="status-items">
+                <div class="status-item">
+                    <div class="status-label">Host</div>
+                    <div class="status-value" id="host-info">—</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">rtl-sdr tools</div>
+                    <div class="status-value" id="tools-info">—</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">About</div>
+                    <div class="status-value" style="font-size:0.8em;color:#a8b8d8;line-height:1.5;">
+                        Prawntenna runs on the machine the dongles are plugged into. Pick a port per dongle, hit Publish, then point your receiver at this host's IP and that port. Port choices are remembered per dongle serial; published dongles survive a Prawntenna restart.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="toast"></div>
+    <script>
+        const cards = {};   // dongle id -> card handles
+        let bindAddr = '0.0.0.0';
+        let toastTimer = null;
+
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        function fmtHz(hz) {
+            const v = Number(hz);
+            if (!v) return '';
+            return (v / 1e6).toFixed(3) + ' MHz';
+        }
+
+        // Everything known about a dongle, one row per fact. Facts that
+        // need the dongle to be free (gains, EEPROM) appear after a deep
+        // scan; USB and tuner info are always available.
+        function renderMeta(c, d, host) {
+            const rows = [];
+            if (d.published) {
+                rows.push(['rtl_tcp', 'pid ' + d.pid + ' · port ' + d.port +
+                    ' · connect at ' + (host.ips && host.ips.length ? host.ips[0] : host.name) + ':' + d.port]);
+                if (d.client) {
+                    const secs = Math.max(0, Math.floor(Date.now() / 1000 - (d.client.since || 0)));
+                    const dur = secs >= 3600 ? Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm'
+                                             : Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+                    rows.push(['client', d.client.addr + ' · connected ' + dur]);
+                } else {
+                    rows.push(['client', 'none']);
+                }
+                const t = d.tune || {};
+                if (t.freq_hz) rows.push(['tuned to', (t.freq_hz / 1e6).toFixed(4) + ' MHz']);
+                if (t.rate_hz) rows.push(['sample rate', (t.rate_hz / 1e6).toFixed(4) + ' MSPS']);
+                if ('gain_mode' in t) {
+                    rows.push(['gain', t.gain_mode
+                        ? ((t.gain_tenth_db || 0) / 10).toFixed(1) + ' dB (manual)'
+                        : 'auto']);
+                }
+                if ('agc' in t) rows.push(['rtl AGC', t.agc ? 'on' : 'off']);
+                if ('ppm' in t && t.ppm) rows.push(['freq correction', t.ppm + ' ppm']);
+                if ('direct_sampling' in t) {
+                    rows.push(['direct sampling', t.direct_sampling === 0 ? 'off' :
+                        (t.direct_sampling === 1 ? 'I branch' : 'Q branch')]);
+                }
+            }
+            const m = d.meta || {};
+            if (m.tuner) rows.push(['tuner', m.tuner]);
+            if (m.startup_tuned_hz) rows.push(['startup tune', fmtHz(m.startup_tuned_hz)]);
+            if (m.gains) rows.push(['gains (dB)', m.gains.split(' ').join(', ')]);
+            const u = d.usb || {};
+            if (u.idVendor) {
+                rows.push(['usb', (u.manufacturer ? u.manufacturer + ' ' : '') +
+                    (u.product || '') + ' · ' + u.idVendor + ':' + u.idProduct +
+                    ' · USB ' + (u.version || '?') +
+                    ' · ' + (u.speed || '?') + ' Mb/s']);
+                rows.push(['usb port', 'bus ' + (u.busnum || '?') + ' · device path ' + (u.devpath || '?')]);
+            }
+            if (d.serial) rows.push(['serial', d.serial]);
+            rows.push(['device index', String(d.index)]);
+            const ep = m.eeprom || {};
+            for (const k in ep) rows.push(['eeprom ' + k.toLowerCase(), ep[k]]);
+            if (!rows.length) {
+                c.meta.innerHTML = '<span style="color:#888;font-size:0.8em;">no details yet' +
+                    (d.scanning ? ' — scanning...' : '') + '</span>';
+                return;
+            }
+            c.meta.innerHTML = rows.map(([k, v]) =>
+                '<div class="meta-row"><span class="meta-key">' + esc(k) + '</span>' +
+                '<span class="meta-val">' + esc(v) + '</span></div>').join('');
+        }
+
+        function toast(msg, isError) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'show' + (isError ? ' error' : '');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => { t.className = ''; }, 4000);
+        }
+
+        function togglePanel(id) {
+            document.getElementById(id).classList.toggle('collapsed');
+        }
+
+        // ---------- dongle cards (keyed by id: the port input keeps its
+        // value and focus across the 3 s status polls) ----------
+
+        function ensureCard(d) {
+            if (cards[d.id]) return cards[d.id];
+            const card = document.createElement('div');
+            card.className = 'dongle-card';
+            card.innerHTML =
+                '<div class="dc-head">' +
+                '  <span class="led"></span>' +
+                '  <span class="dc-name"></span>' +
+                '  <span class="dc-sub"></span>' +
+                '</div>' +
+                '<div class="dc-controls">' +
+                '  <span class="port-label">port</span>' +
+                '  <input class="num-input port-input" type="number" min="1024" max="65535">' +
+                '  <button class="btn-solid publish-btn">➕ Publish</button>' +
+                '  <button class="btn-outline restart-btn" style="display:none;">↻ Restart</button>' +
+                '  <button class="btn-stop stop-btn" style="display:none;">✕ Stop</button>' +
+                '</div>' +
+                '<div class="dc-status"></div>' +
+                '<div class="dc-error" style="display:none;"></div>' +
+                '<div class="dc-hint" style="display:none;"></div>' +
+                '<details class="dc-details">' +
+                '  <summary>device details</summary>' +
+                '  <div class="dc-meta"></div>' +
+                '  <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                '    <button class="btn-outline dc-scan">🔍 Deep scan</button>' +
+                '    <span class="dc-scan-state" style="font-size:0.75em;color:#888;"></span>' +
+                '  </div>' +
+                '</details>';
+            document.getElementById('dongle-list').appendChild(card);
+            const c = {
+                card: card,
+                led: card.querySelector('.led'),
+                name: card.querySelector('.dc-name'),
+                sub: card.querySelector('.dc-sub'),
+                port: card.querySelector('.port-input'),
+                publish: card.querySelector('.publish-btn'),
+                restart: card.querySelector('.restart-btn'),
+                stop: card.querySelector('.stop-btn'),
+                status: card.querySelector('.dc-status'),
+                err: card.querySelector('.dc-error'),
+                hint: card.querySelector('.dc-hint'),
+                meta: card.querySelector('.dc-meta'),
+                scan: card.querySelector('.dc-scan'),
+                scanState: card.querySelector('.dc-scan-state'),
+                edited: false,
+            };
+            c.port.addEventListener('input', () => { c.edited = true; });
+            c.publish.onclick = () => publishDongle(d.id, c);
+            c.restart.onclick = () => publishDongle(d.id, c);
+            c.stop.onclick = () => stopDongle(d.id, c);
+            c.scan.onclick = () => scanDongle(d.id, c);
+            cards[d.id] = c;
+            return c;
+        }
+
+        function updateCard(c, d, host) {
+            c.card.className = 'dongle-card' + (d.published ? ' published' : (d.error ? ' error' : ''));
+            c.led.className = 'led' + (d.published ? ' on' : (d.error ? ' err' : ''));
+            c.name.textContent = d.name;
+            c.sub.textContent = (d.serial ? 'SN ' + d.serial : 'no serial') + ' · device ' + d.index;
+            if (!c.edited) c.port.value = d.published ? d.port : (d.remembered_port || d.suggested_port);
+            c.publish.style.display = d.published ? 'none' : '';
+            c.restart.style.display = d.published ? '' : 'none';
+            c.stop.style.display = d.published ? '' : 'none';
+            c.scan.style.display = d.published ? 'none' : '';
+            c.scanState.textContent = d.scanning ? 'scanning...' : '';
+            renderMeta(c, d, host);
+            if (d.published) {
+                const at = (host.ips && host.ips.length ? host.ips[0] : host.name) + ':' + d.port;
+                const cl = d.client
+                    ? ' — client <span style="color:#53d769;">' + esc(d.client.addr) + '</span>'
+                    : ' — <span style="color:#888;">no client connected</span>';
+                c.status.innerHTML = 'serving on ' + esc(bindAddr) + ':' + d.port +
+                    ' — connect at <span class="dc-addr">' + esc(at) + '</span>' + cl;
+                c.err.style.display = 'none';
+                c.hint.style.display = 'none';
+                return;
+            }
+            c.status.textContent = d.error ? 'stopped' : 'idle — not published';
+            if (d.error) {
+                c.err.textContent = d.error;
+                c.err.style.display = '';
+                if (/usb_claim|resource busy|Failed to open/i.test(d.error)) {
+                    c.hint.textContent = 'the dongle is held by another process (e.g. a system rtl_tcp already serving it) — stop that first';
+                    c.hint.style.display = '';
+                } else {
+                    c.hint.style.display = 'none';
+                }
+            } else {
+                c.err.style.display = 'none';
+                c.hint.style.display = 'none';
+            }
+        }
+
+        // ---------- rendering ----------
+
+        function dropCards() {
+            for (const id in cards) { cards[id].card.remove(); delete cards[id]; }
+        }
+
+        function render(data) {
+            bindAddr = data.bind || bindAddr;
+            const list = document.getElementById('dongle-list');
+            document.getElementById('dongle-count').textContent =
+                data.dongles.length ? '(' + data.dongles.length + ')' : '';
+            if (!data.tools.rtl_tcp || !data.tools.rtl_test) {
+                list.innerHTML = '<div class="empty">rtl-sdr tools not found on this host.<br>' +
+                    'Install them: <span class="dc-addr">sudo apt install rtl-sdr</span> ' +
+                    'and blacklist dvb_usb_rtl28xxu.</div>';
+                dropCards();
+            } else if (!data.dongles.length) {
+                list.innerHTML = '<div class="empty">No RTL-SDR dongles found.<br>' +
+                    'Plug one in (the kernel DVB-T driver must be blacklisted).</div>';
+                dropCards();
+            } else {
+                const seen = new Set();
+                for (const d of data.dongles) {
+                    const c = ensureCard(d);
+                    updateCard(c, d, data.host);
+                    seen.add(d.id);
+                }
+                for (const id in cards) {
+                    if (!seen.has(id)) { cards[id].card.remove(); delete cards[id]; }
+                }
+            }
+            renderStatusPanel(data);
+        }
+
+        function fmtUptime(s) {
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+            return (h ? h + 'h ' : '') + m + 'm ' + (s % 60) + 's';
+        }
+
+        function renderStatusPanel(data) {
+            const h = data.host;
+            const ips = (h.ips && h.ips.length) ? h.ips.join('<br>') : '(no LAN address found)';
+            document.getElementById('host-info').innerHTML =
+                esc(h.name) + '<br><span class="dc-addr">' + ips + '</span><br>' +
+                '<span style="color:#888;font-size:0.85em;">up ' + fmtUptime(h.uptime) + '</span>';
+            document.getElementById('tools-info').innerHTML =
+                'rtl_tcp: ' + (data.tools.rtl_tcp ? '<span style="color:#53d769;">found</span>' : '<span style="color:#e74c3c;">missing</span>') + '<br>' +
+                'rtl_test: ' + (data.tools.rtl_test ? '<span style="color:#53d769;">found</span>' : '<span style="color:#e74c3c;">missing</span>');
+        }
+
+        // ---------- actions ----------
+
+        async function publishDongle(id, c) {
+            const port = parseInt(c.port.value, 10);
+            if (!port || port < 1024 || port > 65535) {
+                toast('Enter a port between 1024 and 65535', true);
+                return;
+            }
+            c.publish.disabled = true;
+            c.restart.disabled = true;
+            try {
+                const res = await fetch('/publish?d=' + encodeURIComponent(id) + '&port=' + port);
+                const data = await res.json();
+                if (data.success) {
+                    toast('Dongle published on port ' + port + ' — rtl_tcp now serving it');
+                    c.edited = false;
+                } else {
+                    toast('Publish failed: ' + (data.message || 'unknown error'), true);
+                }
+            } catch (e) {
+                toast('Publish failed: server unreachable', true);
+            }
+            c.publish.disabled = false;
+            c.restart.disabled = false;
+            poll();
+        }
+
+        async function stopDongle(id) {
+            try {
+                const res = await fetch('/stop?d=' + encodeURIComponent(id));
+                const data = await res.json();
+                if (data.success) toast(data.message || 'Stopped');
+                else toast('Stop failed: ' + (data.message || 'unknown error'), true);
+            } catch (e) {
+                toast('Stop failed: server unreachable', true);
+            }
+            poll();
+        }
+
+        async function scanDongle(id, c) {
+            c.scan.disabled = true;
+            c.scanState.textContent = 'scanning...';
+            try {
+                const res = await fetch('/scan?d=' + encodeURIComponent(id));
+                const data = await res.json();
+                if (data.success) toast('Device details scanned');
+                else toast('Scan failed: ' + (data.message || 'unknown error'), true);
+            } catch (e) {
+                toast('Scan failed: server unreachable', true);
+            }
+            c.scan.disabled = false;
+            c.scanState.textContent = '';
+            poll();
+        }
+
+        // ---------- polling ----------
+
+        async function poll() {
+            try {
+                const res = await fetch('/dongles.json');
+                const data = await res.json();
+                if (data.success) render(data);
+            } catch (e) { /* keep last state on transient failures */ }
+        }
+
+        setInterval(poll, 3000);
+        poll();
+    </script>
+</body>
+</html>

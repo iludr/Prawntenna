@@ -1,0 +1,4 @@
+# rtl_tcp state (remembered ports, adopted pids) and runtime logs
+dongles.json
+logs/
+__pycache__/
