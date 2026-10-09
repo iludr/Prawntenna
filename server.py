@@ -138,13 +138,26 @@ def port_available(port):
         return False
 
 
-def port_listening(port):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.5)
-            return s.connect_ex(('127.0.0.1', port)) == 0
-    except OSError:
-        return False
+def tcp_listening(port):
+    """LISTEN check via /proc/net/tcp — makes no connection.
+
+    A connect probe would be served by rtl_tcp like any client, and the
+    instant probe close can poison it: rtl_tcp's write-error path sets
+    its exit flag and cancels the USB transfers while the process keeps
+    serving sockets — a silent, hung stream.
+    """
+    for path in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            with open(path) as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for ln in lines:
+            parts = ln.split()
+            if (len(parts) > 3 and parts[3] == '0A'
+                    and int(parts[1].rsplit(':', 1)[1], 16) == port):
+                return True
+    return False
 
 
 def lan_ips():
@@ -308,6 +321,43 @@ def maybe_autorepublish(did, rt):
     threading.Thread(target=work, daemon=True).start()
 
 
+def stream_watchdog():
+    """Kill a wedged rtl_tcp so the stream can heal itself.
+
+    rtl_tcp streams continuously while it serves a client — silence
+    means its USB transfers were cancelled (its signal handler sets an
+    exit flag, but the process keeps its sockets open, leaving a hung
+    stream). A rtl_tcp that stopped listening accepts no clients at all.
+    In both cases SIGKILL it: the proxy relays unwind, the auto-republish
+    watchdog brings up a fresh rtl_tcp and the receiver reconnects.
+    """
+    while True:
+        time.sleep(5)
+        victims = []
+        with _lock:
+            now = time.time()
+            for did, rt in _runtime.items():
+                if not entry_alive(rt):
+                    continue
+                stalled = (rt.get('client') is not None
+                           and now - rt.get('iq_ts', 0) > 10)
+                deaf = (now - rt.get('born', 0) > 15
+                        and not tcp_listening(rt.get('iport') or 0))
+                if stalled or deaf:
+                    victims.append((did, rt))
+        for did, rt in victims:
+            try:
+                if rt.get('proc') is not None:
+                    rt['proc'].kill()
+                else:
+                    os.kill(rt['pid'], signal.SIGKILL)
+            except OSError:
+                continue
+            rt['error'] = 'rtl_tcp stalled — killed, auto-restarting'
+            with _lock:
+                _auto_retry_ts[did] = 0   # republish on the next poll
+
+
 def pid_alive(pid):
     """POSIX-only liveness probe (pid adoption is a /proc feature)."""
     return bool(pid) and os.path.isdir('/proc/%d' % pid)
@@ -393,6 +443,8 @@ def _relay(src, dst, entry, parse_cmds):
                         with _lock:
                             entry['tune'][key] = int.from_bytes(pending[1:5], 'big')
                     pending = pending[5:]
+            if not parse_cmds:
+                entry['iq_ts'] = time.time()  # feeds the stream watchdog
             dst.sendall(data)
     except OSError:
         pass
@@ -438,6 +490,7 @@ def _proxy_loop(entry):
             entry['client'] = {'addr': '%s:%d' % (addr[0], addr[1]),
                                'since': int(time.time())}
             entry['tune'] = {}
+            entry['iq_ts'] = time.time()
         try:
             upstream = socket.create_connection(('127.0.0.1', entry['iport']),
                                                 timeout=5)
@@ -498,6 +551,12 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
     the public port and relays both directions, so the dashboard can
     show the connected client and its tune commands.
 
+    On a same-port restart the public listener and its proxy thread are
+    kept and only the rtl_tcp child is replaced: rebinding a port
+    fails while a client is (re)connecting on it, and a listener that
+    survives watchdog kills is what lets the auto-republish recover a
+    stalled stream.
+
     Optional rtl_tcp spawn options: freq/rate in Hz, gain in tenths of
     dB. _UNSET (internal callers) reuses the remembered per-dongle
     value, None clears it (rtl_tcp default), an int applies and
@@ -520,14 +579,25 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
             if other != did and rt.get('port') == port and entry_alive(rt):
                 return False, ('port %d already publishes dongle %s'
                                % (port, other))
-        if did in _runtime:
-            stop_dongle(did)  # restart / port change
-    if shutil.which('rtl_tcp') is None:
-        return False, 'rtl_tcp not found on this host (install rtl-sdr)'
-    lsock = _bind_listener(port)
-    if lsock is None:
-        return False, ('port %d is already in use on this host '
-                       '(another rtl_tcp or service)' % port)
+        old = _runtime.get(did)
+    # same port: keep the listener (and its proxy thread); only the
+    # rtl_tcp child behind it is replaced
+    reuse = old if (old is not None and old.get('port') == port
+                    and old.get('listener')) else None
+    if reuse is not None:
+        lsock = reuse['listener']
+    else:
+        if shutil.which('rtl_tcp') is None:
+            return False, 'rtl_tcp not found on this host (install rtl-sdr)'
+        # bind first: on failure nothing has been torn down yet
+        lsock = _bind_listener(port)
+        if lsock is None:
+            return False, ('port %d is already in use on this host '
+                           '(another rtl_tcp or service)' % port)
+    if old is not None:
+        kill_entry(old)
+        if reuse is None and old.get('listener'):
+            _close_sock(old['listener'])  # port change: old listener goes
     # free loopback port for rtl_tcp itself
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -535,14 +605,16 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
         iport = probe.getsockname()[1]
         probe.close()
     except OSError:
-        _close_sock(lsock)
+        if reuse is None:
+            _close_sock(lsock)
         return False, 'cannot allocate an internal port'
     log = log_path(did)
     os.makedirs(LOG_DIR, exist_ok=True)
     try:
         lf = open(log, 'wb')
     except OSError:
-        _close_sock(lsock)
+        if reuse is None:
+            _close_sock(lsock)
         return False, 'cannot write log %s' % log
     # rtl_tcp spawn options: explicit values here, else the remembered
     # per-dongle ones (None = rtl_tcp default). -f/-s take Hz, -g takes
@@ -571,12 +643,22 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
             start_new_session=True)
     except FileNotFoundError:
         lf.close()
-        _close_sock(lsock)
+        if reuse is None:
+            _close_sock(lsock)
         return False, 'rtl_tcp not found on this host (install rtl-sdr)'
     lf.close()
-    entry = {'proc': proc, 'pid': proc.pid, 'port': port, 'iport': iport,
-             'listener': lsock, 'client': None, 'tune': {},
-             'error': '', 'log': log, 'spawn_opts': ' '.join(opts)}
+    if reuse is not None:
+        entry = reuse   # mutate in place: the proxy thread keeps working
+        with _lock:
+            entry.update({'proc': proc, 'pid': proc.pid, 'iport': iport,
+                          'client': None, 'tune': {}, 'error': '',
+                          'log': log, 'spawn_opts': ' '.join(opts),
+                          'iq_ts': 0, 'born': time.time()})
+    else:
+        entry = {'proc': proc, 'pid': proc.pid, 'port': port, 'iport': iport,
+                 'listener': lsock, 'client': None, 'tune': {},
+                 'error': '', 'log': log, 'spawn_opts': ' '.join(opts),
+                 'iq_ts': 0, 'born': time.time()}
     with _lock:
         _runtime[did] = entry
         _ports[did] = port
@@ -587,16 +669,20 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
         if proc.poll() is not None:
             tail = error_from_log(log)
             entry['error'] = tail or ('rtl_tcp exited with code %s' % proc.returncode)
-            _close_sock(lsock)
+            if reuse is None:
+                _close_sock(lsock)
             with _lock:
                 save_state_locked()  # dead entry: not persisted as published
             return False, entry['error']
-        if port_listening(iport):
-            threading.Thread(target=_proxy_loop, args=(entry,), daemon=True).start()
+        if tcp_listening(iport):
+            if reuse is None:
+                threading.Thread(target=_proxy_loop, args=(entry,),
+                                 daemon=True).start()
             return True, 'rtl_tcp serving %s on %s:%d' % (d['name'], RTL_BIND, port)
         time.sleep(0.1)
     entry['error'] = 'rtl_tcp did not start listening on port %d' % port
-    _close_sock(lsock)
+    if reuse is None:
+        _close_sock(lsock)
     return False, entry['error']
 
 
@@ -629,7 +715,8 @@ def startup_restore(saved):
                     _runtime[did] = {'proc': None, 'pid': pid, 'port': port,
                                       'iport': iport, 'listener': lsock,
                                       'client': None, 'tune': {},
-                                      'error': '', 'log': log_path(did)}
+                                      'error': '', 'log': log_path(did),
+                                      'iq_ts': 0, 'born': time.time()}
                     threading.Thread(target=_proxy_loop,
                                      args=(_runtime[did],), daemon=True).start()
                 continue
@@ -797,6 +884,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     saved = load_state()
     threading.Thread(target=startup_restore, args=(saved,), daemon=True).start()
+    threading.Thread(target=stream_watchdog, daemon=True).start()
     httpd = ThreadingHTTPServer(('0.0.0.0', WEB_PORT), Handler)
     print('Prawntenna serving on http://0.0.0.0:%d' % WEB_PORT, flush=True)
     try:
