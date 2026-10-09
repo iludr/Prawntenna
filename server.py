@@ -43,10 +43,17 @@ ENUM_PROBE = ['rtl_test', '-d', '65535']
 _lock = threading.RLock()
 _ports = {}     # dongle id -> port last chosen by the user (persisted)
 _meta = {}      # dongle id -> deep-scan details (persisted)
+_params = {}    # dongle id -> rtl_tcp spawn options last chosen by the
+                # user (persisted): {'freq': Hz|None, 'rate': Hz|None,
+                # 'gain': tenth-dB|None}; None = rtl_tcp default
 _runtime = {}   # dongle id -> {'proc': Popen|None, 'pid', 'port', 'error', 'log'}
 _scanning = set()
 _scan_ts = {}       # dongle id -> time of the last deep-scan attempt (cooldown)
 _auto_retry_ts = {}  # dongle id -> time of the last auto-republish attempt
+
+# Sentinel for "argument not given": publish_dongle then reuses the
+# remembered per-dongle option instead of clearing it (None would).
+_UNSET = object()
 
 
 # ---------- dongle enumeration ----------
@@ -112,6 +119,15 @@ def usb_sysfs_meta(serial):
 
 
 # ---------- helpers ----------
+
+def _to_int(v):
+    """HTTP query value -> positive int; None when empty/invalid/<= 0."""
+    try:
+        n = int(float(v))
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
 
 def port_available(port):
     try:
@@ -306,12 +322,13 @@ def entry_alive(rt):
 # ---------- state persistence ----------
 
 def load_state():
-    global _ports, _meta
+    global _ports, _meta, _params
     try:
         with open(STATE_FILE, 'r', encoding='utf-8') as f:
             state = json.load(f)
         _ports = state.get('ports', {})
         _meta = state.get('meta', {})
+        _params = state.get('params', {})
         return state.get('published', {})
     except (OSError, ValueError):
         return {}
@@ -325,7 +342,7 @@ def save_state_locked():
     try:
         with open(STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump({'ports': _ports, 'published': published,
-                       'meta': _meta}, f, indent=2)
+                       'meta': _meta, 'params': _params}, f, indent=2)
     except OSError:
         pass
 
@@ -474,12 +491,17 @@ def stop_dongle(did):
     return True, 'rtl_tcp stopped (port %d released)' % rt['port']
 
 
-def publish_dongle(did, port):
+def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
     """Publish a dongle; restarts it if already published.
 
     rtl_tcp listens on a private loopback port; a Prawntenna proxy owns
     the public port and relays both directions, so the dashboard can
     show the connected client and its tune commands.
+
+    Optional rtl_tcp spawn options: freq/rate in Hz, gain in tenths of
+    dB. _UNSET (internal callers) reuses the remembered per-dongle
+    value, None clears it (rtl_tcp default), an int applies and
+    remembers it.
     """
     dongles = enumerate_dongles()
     if dongles is None:
@@ -522,9 +544,29 @@ def publish_dongle(did, port):
     except OSError:
         _close_sock(lsock)
         return False, 'cannot write log %s' % log
+    # rtl_tcp spawn options: explicit values here, else the remembered
+    # per-dongle ones (None = rtl_tcp default). -f/-s take Hz, -g takes
+    # tenths of dB where 0 means auto — skipped when falsy.
+    with _lock:
+        remembered = _params.get(did) or {}
+    if freq is _UNSET:
+        freq = remembered.get('freq')
+    if rate is _UNSET:
+        rate = remembered.get('rate')
+    if gain is _UNSET:
+        gain = remembered.get('gain')
+    opts = []
+    if freq:
+        opts += ['-f', str(int(freq))]
+    if rate:
+        opts += ['-s', str(int(rate))]
+    if gain:
+        opts += ['-g', str(int(gain))]
+    argv = ['rtl_tcp', '-a', '127.0.0.1', '-p', str(iport),
+            '-d', device_selector(d)] + opts
     try:
         proc = subprocess.Popen(
-            ['rtl_tcp', '-a', '127.0.0.1', '-p', str(iport), '-d', device_selector(d)],
+            argv,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=lf,
             start_new_session=True)
     except FileNotFoundError:
@@ -534,10 +576,11 @@ def publish_dongle(did, port):
     lf.close()
     entry = {'proc': proc, 'pid': proc.pid, 'port': port, 'iport': iport,
              'listener': lsock, 'client': None, 'tune': {},
-             'error': '', 'log': log}
+             'error': '', 'log': log, 'spawn_opts': ' '.join(opts)}
     with _lock:
         _runtime[did] = entry
         _ports[did] = port
+        _params[did] = {'freq': freq, 'rate': rate, 'gain': gain}
         save_state_locked()
     deadline = time.time() + 3.0
     while time.time() < deadline:
@@ -641,6 +684,8 @@ def api_state():
                 if rt is not None and not published:
                     error = rt.get('error') or ''
                 meta = dict(_meta.get(did) or {})
+                spawn_opts = (rt or {}).get('spawn_opts', '')
+                remembered_params = dict(_params.get(did) or {})
             if published and 'tuner' not in meta:
                 # the rtl_tcp startup log names the tuner — available
                 # even while the dongle is held, no probing possible
@@ -659,6 +704,8 @@ def api_state():
                         'client': client, 'tune': tune,
                         'suggested_port': 1234 + d['index'],
                         'remembered_port': remembered,
+                        'remembered_params': remembered_params,
+                        'spawn_opts': spawn_opts,
                         'usb': usb_sysfs_meta(d['serial']),
                         'meta': meta, 'scanning': scanning})
     return {'success': True, 'dongles': out, 'tools': tools,
@@ -672,7 +719,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        path, params = parsed.path, parse_qs(parsed.query)
+        # keep_blank_values: 'freq=' (empty) means "clear the remembered
+        # value" and must stay distinguishable from an absent param
+        path, params = parsed.path, parse_qs(parsed.query,
+                                             keep_blank_values=True)
         try:
             if path == '/':
                 self._serve_index()
@@ -684,7 +734,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not did:
                     self._json({'success': False, 'message': 'missing dongle id'})
                 else:
-                    ok, msg = publish_dongle(did, port)
+                    # freq/rate/gain: absent → keep remembered, empty or
+                    # invalid → clear it (rtl_tcp default), valid → apply
+                    freq = _to_int(params['freq'][0]) if 'freq' in params else _UNSET
+                    rate = _to_int(params['rate'][0]) if 'rate' in params else _UNSET
+                    gain = _to_int(params['gain'][0]) if 'gain' in params else _UNSET
+                    ok, msg = publish_dongle(did, port, freq, rate, gain)
                     self._json({'success': ok, 'message': msg})
             elif path == '/stop':
                 did = (params.get('d') or [''])[0]

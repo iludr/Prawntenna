@@ -135,6 +135,7 @@
             if (d.published) {
                 rows.push(['rtl_tcp', 'pid ' + d.pid + ' · port ' + d.port +
                     ' · connect at ' + (host.ips && host.ips.length ? host.ips[0] : host.name) + ':' + d.port]);
+                if (d.spawn_opts) rows.push(['spawn opts', d.spawn_opts]);
                 if (d.client) {
                     const secs = Math.max(0, Math.floor(Date.now() / 1000 - (d.client.since || 0)));
                     const dur = secs >= 3600 ? Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm'
@@ -222,6 +223,16 @@
                 '<details class="dc-details">' +
                 '  <summary>device details</summary>' +
                 '  <div class="dc-meta"></div>' +
+                '  <div class="dc-controls">' +
+                '    <span class="port-label">spawn options:</span>' +
+                '    <span class="port-label">freq</span>' +
+                '    <input class="num-input freq-input" type="number" step="any" min="0" placeholder="MHz">' +
+                '    <span class="port-label">rate</span>' +
+                '    <input class="num-input rate-input" type="number" step="any" min="0" placeholder="kS/s">' +
+                '    <span class="port-label">gain</span>' +
+                '    <input class="num-input gain-input" type="number" step="any" min="0" placeholder="dB">' +
+                '  </div>' +
+                '  <div style="font-size:0.75em;color:#888;margin-top:2px;">applied on next Publish/Restart \u2014 empty = rtl_tcp defaults (100 MHz \u00b7 2.048 MSPS \u00b7 auto gain)</div>' +
                 '  <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
                 '    <button class="btn-outline dc-scan">🔍 Deep scan</button>' +
                 '    <span class="dc-scan-state" style="font-size:0.75em;color:#888;"></span>' +
@@ -234,6 +245,9 @@
                 name: card.querySelector('.dc-name'),
                 sub: card.querySelector('.dc-sub'),
                 port: card.querySelector('.port-input'),
+                freq: card.querySelector('.freq-input'),
+                rate: card.querySelector('.rate-input'),
+                gain: card.querySelector('.gain-input'),
                 publish: card.querySelector('.publish-btn'),
                 restart: card.querySelector('.restart-btn'),
                 stop: card.querySelector('.stop-btn'),
@@ -244,8 +258,12 @@
                 scan: card.querySelector('.dc-scan'),
                 scanState: card.querySelector('.dc-scan-state'),
                 edited: false,
+                pEdited: false,
             };
             c.port.addEventListener('input', () => { c.edited = true; });
+            for (const el of [c.freq, c.rate, c.gain]) {
+                el.addEventListener('input', () => { c.pEdited = true; });
+            }
             c.publish.onclick = () => publishDongle(d.id, c);
             c.restart.onclick = () => publishDongle(d.id, c);
             c.stop.onclick = () => stopDongle(d.id, c);
@@ -260,6 +278,14 @@
             c.name.textContent = d.name;
             c.sub.textContent = (d.serial ? 'SN ' + d.serial : 'no serial') + ' · device ' + d.index;
             if (!c.edited) c.port.value = d.published ? d.port : (d.remembered_port || d.suggested_port);
+            // spawn options prefill: remembered params, converted to the
+            // field units (MHz / kS/s / dB); empty = rtl_tcp default
+            if (!c.pEdited) {
+                const rp = d.remembered_params || {};
+                c.freq.value = rp.freq ? rp.freq / 1e6 : '';
+                c.rate.value = rp.rate ? rp.rate / 1000 : '';
+                c.gain.value = rp.gain ? rp.gain / 10 : '';
+            }
             c.publish.style.display = d.published ? 'none' : '';
             c.restart.style.display = d.published ? '' : 'none';
             c.stop.style.display = d.published ? '' : 'none';
@@ -354,11 +380,21 @@
             c.publish.disabled = true;
             c.restart.disabled = true;
             try {
-                const res = await fetch('/publish?d=' + encodeURIComponent(id) + '&port=' + port);
+                // spawn options: the API speaks Hz and tenths of dB; an empty
+                // field sends '' (clears the remembered option), a typed value
+                // is converted — all three are always sent so the user can
+                // also remove a remembered option via the UI
+                const f = parseFloat(c.freq.value), r = parseFloat(c.rate.value), g = parseFloat(c.gain.value);
+                const qs = '/publish?d=' + encodeURIComponent(id) + '&port=' + port +
+                    '&freq=' + (isFinite(f) ? Math.round(f * 1e6) : '') +
+                    '&rate=' + (isFinite(r) ? Math.round(r * 1000) : '') +
+                    '&gain=' + (isFinite(g) ? Math.round(g * 10) : '');
+                const res = await fetch(qs);
                 const data = await res.json();
                 if (data.success) {
                     toast('Dongle published on port ' + port + ' — rtl_tcp now serving it');
                     c.edited = false;
+                    c.pEdited = false;
                 } else {
                     toast('Publish failed: ' + (data.message || 'unknown error'), true);
                 }
