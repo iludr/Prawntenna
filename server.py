@@ -742,6 +742,9 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
             entry['error'] = tail or ('rtl_tcp exited with code %s' % proc.returncode)
             if reuse is None:
                 _close_sock(lsock)
+                # forget the closed socket: a later same-port publish
+                # must bind a fresh listener, not reuse a dead one
+                entry['listener'] = None
             with _lock:
                 save_state_locked()  # dead entry: not persisted as published
             return False, entry['error']
@@ -754,6 +757,7 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
     entry['error'] = 'rtl_tcp did not start listening on port %d' % port
     if reuse is None:
         _close_sock(lsock)
+        entry['listener'] = None  # closed: not reusable (see above)
     return False, entry['error']
 
 
