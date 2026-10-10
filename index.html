@@ -51,6 +51,7 @@
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
         .dc-name { font-weight: bold; color: #53d769; }
         .dc-sub { font-size: 0.8em; color: #888; }
+.dc-freq { margin-left: auto; color: #4da6ff; font-size: 0.9em; }
         .dc-controls { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
         .dc-controls .port-label { font-size: 0.85em; color: #888; }
         .dc-status { font-size: 0.85em; color: #a8b8d8; margin-top: 6px; }
@@ -209,6 +210,7 @@
                 '  <span class="led"></span>' +
                 '  <span class="dc-name"></span>' +
                 '  <span class="dc-sub"></span>' +
+'  <span class="dc-freq"></span>' +
                 '</div>' +
                 '<div class="dc-controls">' +
                 '  <span class="port-label">port</span>' +
@@ -244,6 +246,7 @@
                 led: card.querySelector('.led'),
                 name: card.querySelector('.dc-name'),
                 sub: card.querySelector('.dc-sub'),
+                freqBadge: card.querySelector('.dc-freq'),
                 port: card.querySelector('.port-input'),
                 freq: card.querySelector('.freq-input'),
                 rate: card.querySelector('.rate-input'),
@@ -277,6 +280,11 @@
             c.led.className = 'led' + (d.published ? ' on' : (d.error ? ' err' : ''));
             c.name.textContent = d.name;
             c.sub.textContent = (d.serial ? 'SN ' + d.serial : 'no serial') + ' · device ' + d.index;
+            const tf = d.published
+                ? ((d.tune || {}).freq_hz || (d.remembered_params || {}).freq || 100000000)
+                : null;
+            c.freqBadge.textContent = tf ? (tf / 1e6).toFixed(4) + ' MHz' : '';
+            c.freqBadge.style.display = tf ? '' : 'none';
             if (!c.edited) c.port.value = d.published ? d.port : (d.remembered_port || d.suggested_port);
             // spawn options prefill: remembered params, converted to the
             // field units (MHz / kS/s / dB); empty = rtl_tcp default
