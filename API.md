@@ -93,6 +93,15 @@ Parameters:
 - **present but empty or invalid** (`?ppm=`) — clear it, rtl_tcp default
 - **present and valid** — apply it and remember it for next time
 
+**Warning about `buffers`/`buflen` on multi-dongle hosts:** on a
+Raspberry Pi with two dongles sharing one USB 2 bus, non-default
+`-b`/`-n` values (measured: `-b 32 -n 512`) collapsed the throughput of
+**both** dongles to a few percent — the victim's stream delivered 3.4%
+of its nominal sample rate with a raised noise floor. With rtl_tcp's
+default buffer settings the same dongles coexist at full rate even
+with one streaming at 2.048 MSPS. Leave `buffers`/`buflen` unset
+unless you have measured a benefit on your specific hardware.
+
 Typical error messages: the port already publishes another dongle, the
 port is used by another service on the host, the dongle is unplugged,
 or rtl_tcp failed to start (its log tail is returned).
