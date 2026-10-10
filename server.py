@@ -448,6 +448,20 @@ def _close_sock(s):
         pass
 
 
+def _detach_listener(rt):
+    """Forget and close the entry's listener, waking its accept loop.
+
+    close() alone does not interrupt a thread blocked in accept() —
+    the in-flight syscall keeps the socket (and its port) alive in
+    the kernel. The loop re-checks ownership via a short timeout, so
+    it exits within a second of the detach."""
+    with _lock:
+        lsock = rt.get('listener')
+        rt['listener'] = None
+    if lsock is not None:
+        _close_sock(lsock)
+
+
 # rtl_tcp client commands: 1 byte id + uint32 big-endian parameter.
 # rtl_tcp itself never reports its state back — parsing the command
 # stream on the way through is the only way to know the tune settings.
@@ -507,10 +521,22 @@ def _proxy_loop(entry):
     frequency/gain/rate the client tunes to. Bytes pass through
     unmodified, and only one client is served at a time — exactly like
     rtl_tcp itself.
+
+    The accept has a short timeout: close() does not interrupt a
+    thread blocked in accept() (the syscall keeps the port bound),
+    so stop/port-change detaches the listener from the entry and
+    this loop notices that within a second and exits.
     """
+    lsock = entry['listener']
+    lsock.settimeout(1.0)
     while True:
         try:
-            client, addr = entry['listener'].accept()
+            client, addr = lsock.accept()
+        except socket.timeout:
+            with _lock:
+                if entry.get('listener') is not lsock:
+                    return  # stopped / port reassigned: listener closed
+            continue
         except OSError:
             return  # listener closed: dongle stopped / manager shutting down
         with _lock:
@@ -565,8 +591,7 @@ def stop_dongle(did):
         rt = _runtime.get(did)
     if rt is None:
         return False, 'dongle not published'
-    if rt.get('listener'):
-        _close_sock(rt['listener'])  # ends the proxy accept loop
+    _detach_listener(rt)  # closes the listener, ends the proxy accept loop
     kill_entry(rt)
     with _lock:
         _runtime.pop(did, None)
@@ -643,8 +668,8 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
                            '(another rtl_tcp or service)' % port)
     if old is not None:
         kill_entry(old)
-        if reuse is None and old.get('listener'):
-            _close_sock(old['listener'])  # port change: old listener goes
+        if reuse is None:
+            _detach_listener(old)  # port change: old listener goes
     # free loopback port for rtl_tcp itself
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -741,10 +766,9 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
             tail = error_from_log(log)
             entry['error'] = tail or ('rtl_tcp exited with code %s' % proc.returncode)
             if reuse is None:
-                _close_sock(lsock)
                 # forget the closed socket: a later same-port publish
                 # must bind a fresh listener, not reuse a dead one
-                entry['listener'] = None
+                _detach_listener(entry)
             with _lock:
                 save_state_locked()  # dead entry: not persisted as published
             return False, entry['error']
@@ -756,8 +780,7 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
         time.sleep(0.1)
     entry['error'] = 'rtl_tcp did not start listening on port %d' % port
     if reuse is None:
-        _close_sock(lsock)
-        entry['listener'] = None  # closed: not reusable (see above)
+        _detach_listener(entry)  # closed: not reusable (see above)
     return False, entry['error']
 
 
