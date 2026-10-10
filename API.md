@@ -108,7 +108,8 @@ or rtl_tcp failed to start (its log tail is returned).
 
 ### `GET /stop?d=ID` — stop a dongle
 
-Stops the rtl_tcp spawned for this dongle and releases its port.
+Stops the rtl_tcp spawned for this dongle and releases its port. The
+dongle stays stopped — nothing republishes it automatically.
 
 ### `GET /scan?d=ID` — deep-scan a dongle
 
@@ -148,14 +149,19 @@ unmodified, Prawntenna only observes):
 
 Runtime commands always override the spawn options set via `/publish`.
 
-## Self-healing behaviour clients should know
+## Crashed or wedged rtl_tcp handling
 
-- If rtl_tcp dies or the stream wedges, Prawntenna kills it and
-  **automatically republishes** the dongle on the same port within
-  ~30 s. The public port stays owned by Prawntenna during this.
-- Recommended client loop: connect → on disconnect, retry with backoff
-  (a few seconds); only call `/publish` again if `/dongles.json` shows
-  the dongle as not `published`.
+- Prawntenna does **not** restart dongles by itself. If rtl_tcp dies or
+  the stream wedges, the watchdog kills the wedged process (so the
+  client sees a clean disconnect), the dongle shows up as not
+  `published` with the reason in `error` — and it stays that way until
+  a client republishes it.
+- Deliberately stopped dongles (`/stop`) also stay stopped forever;
+  nothing brings them back but an explicit `/publish`.
+- Recommended client loop: connect → on disconnect, retry with
+  backoff; if `/dongles.json` shows the dongle as not `published`,
+  call `/publish` again (port and options are remembered, a plain
+  `GET /publish?d=ID&port=P` restores the previous configuration).
 
 ## Recommended client flow
 
@@ -163,7 +169,8 @@ Runtime commands always override the spawn options set via `/publish`.
 1. GET /dongles.json                    -> pick a dongle by id
 2. GET /publish?d=ID&port=P&freq=...    -> publish it
 3. TCP connect to HOST:P                -> rtl_tcp protocol
-4. on stream drop: reconnect (backoff)  -> manager self-heals
+4. on stream drop: reconnect (backoff);
+   if not published, /publish again     -> manager never self-heals
 5. when done: GET /stop?d=ID            -> release the dongle
 ```
 

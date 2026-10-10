@@ -52,7 +52,6 @@ _params = {}    # dongle id -> rtl_tcp spawn options last chosen by the
 _runtime = {}   # dongle id -> {'proc': Popen|None, 'pid', 'port', 'error', 'log'}
 _scanning = set()
 _scan_ts = {}       # dongle id -> time of the last deep-scan attempt (cooldown)
-_auto_retry_ts = {}  # dongle id -> time of the last auto-republish attempt
 
 # Sentinel for "argument not given": publish_dongle then reuses the
 # remembered per-dongle option instead of clearing it (None would).
@@ -329,28 +328,6 @@ def maybe_autoscan(did, published):
     threading.Thread(target=force_scan, args=(did,), daemon=True).start()
 
 
-def maybe_autorepublish(did, rt):
-    """Bring back a published dongle whose rtl_tcp died unexpectedly.
-
-    Deliberate stops pop the runtime entry, so only unexpected deaths
-    (dongle glitch, rtl_tcp crash) end up here — republished on their
-    remembered port, at most every 30 s.
-    """
-    if rt is None or entry_alive(rt) or not rt.get('port'):
-        return
-    with _lock:
-        if time.time() - _auto_retry_ts.get(did, 0) < 30:
-            return
-        _auto_retry_ts[did] = time.time()
-    port = rt['port']
-
-    def work():
-        time.sleep(2)  # give the kernel a moment to release the USB device
-        publish_dongle(did, port)
-
-    threading.Thread(target=work, daemon=True).start()
-
-
 def stream_watchdog():
     """Kill a wedged rtl_tcp so the stream can heal itself.
 
@@ -358,8 +335,9 @@ def stream_watchdog():
     means its USB transfers were cancelled (its signal handler sets an
     exit flag, but the process keeps its sockets open, leaving a hung
     stream). A rtl_tcp that stopped listening accepts no clients at all.
-    In both cases SIGKILL it: the proxy relays unwind, the auto-republish
-    watchdog brings up a fresh rtl_tcp and the receiver reconnects.
+    In both cases SIGKILL it: the proxy relays unwind and the client
+    sees a clean disconnect. Nothing restarts automatically after
+    that — republishing the dongle is the client's job.
     """
     while True:
         time.sleep(5)
@@ -383,9 +361,7 @@ def stream_watchdog():
                     os.kill(rt['pid'], signal.SIGKILL)
             except OSError:
                 continue
-            rt['error'] = 'rtl_tcp stalled — killed, auto-restarting'
-            with _lock:
-                _auto_retry_ts[did] = 0   # republish on the next poll
+            rt['error'] = 'rtl_tcp stalled — killed (republish to restart)'
 
 
 def pid_alive(pid):
@@ -890,7 +866,6 @@ def api_state():
                 if t:
                     meta['startup_tuned_hz'] = t.group(1)
             maybe_autoscan(did, published)
-            maybe_autorepublish(did, rt)
             out.append({'id': did, 'index': d['index'], 'name': d['name'],
                         'serial': d['serial'], 'published': published,
                         'port': port, 'pid': pid, 'error': error,
