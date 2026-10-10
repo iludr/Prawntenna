@@ -7,6 +7,7 @@ one as an rtl_tcp server on a user-chosen IP port, so network receivers
 anywhere on the LAN.
 
 Stdlib only. Usage: python3 server.py [web_port]  (default: 8080)
+The HTTP API is documented in API.md, also served at /api.
 
 The manager never disturbs dongles or rtl_tcp processes it did not
 start: enumeration probes rtl_test with an out-of-range device index
@@ -30,6 +31,7 @@ from urllib.parse import urlparse, parse_qs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_FILE = os.path.join(BASE_DIR, 'index.html')
+API_FILE = os.path.join(BASE_DIR, 'API.md')
 STATE_FILE = os.path.join(BASE_DIR, 'dongles.json')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 WEB_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
@@ -44,8 +46,9 @@ _lock = threading.RLock()
 _ports = {}     # dongle id -> port last chosen by the user (persisted)
 _meta = {}      # dongle id -> deep-scan details (persisted)
 _params = {}    # dongle id -> rtl_tcp spawn options last chosen by the
-                # user (persisted): {'freq': Hz|None, 'rate': Hz|None,
-                # 'gain': tenth-dB|None}; None = rtl_tcp default
+                # user (persisted): freq/rate Hz, gain tenth-dB, ppm
+                # signed, buffers/buflen counts, biastee bool, ds 0/1/2.
+                # None = rtl_tcp default
 _runtime = {}   # dongle id -> {'proc': Popen|None, 'pid', 'port', 'error', 'log'}
 _scanning = set()
 _scan_ts = {}       # dongle id -> time of the last deep-scan attempt (cooldown)
@@ -125,6 +128,33 @@ def _to_int(v):
     try:
         n = int(float(v))
         return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_signed(v):
+    """HTTP query value -> signed int; None when empty/invalid."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_bool(v):
+    """HTTP query value -> bool; None when invalid."""
+    s = str(v).strip().lower()
+    if s in ('1', 'true', 'yes', 'on'):
+        return True
+    if s in ('0', 'false', 'no', 'off', ''):
+        return False
+    return None
+
+
+def _to_ds(v):
+    """HTTP query value -> direct-sampling mode 0/1/2; None otherwise."""
+    try:
+        n = int(float(v))
+        return n if n in (0, 1, 2) else None
     except (TypeError, ValueError):
         return None
 
@@ -544,7 +574,9 @@ def stop_dongle(did):
     return True, 'rtl_tcp stopped (port %d released)' % rt['port']
 
 
-def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
+def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
+                   ppm=_UNSET, buffers=_UNSET, buflen=_UNSET,
+                   biastee=_UNSET, ds=_UNSET):
     """Publish a dongle; restarts it if already published.
 
     rtl_tcp listens on a private loopback port; a Prawntenna proxy owns
@@ -557,10 +589,11 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
     survives watchdog kills is what lets the auto-republish recover a
     stalled stream.
 
-    Optional rtl_tcp spawn options: freq/rate in Hz, gain in tenths of
-    dB. _UNSET (internal callers) reuses the remembered per-dongle
-    value, None clears it (rtl_tcp default), an int applies and
-    remembers it.
+    Optional rtl_tcp spawn options: freq/rate in Hz, gain in tenths
+    of dB, ppm signed, buffers/buflen USB transfer buffer counts,
+    biastee bool, ds direct-sampling mode 0/1/2. _UNSET (internal
+    callers) reuses the remembered per-dongle value, None clears it
+    (rtl_tcp default), a value applies and remembers it.
     """
     dongles = enumerate_dongles()
     if dongles is None:
@@ -632,7 +665,9 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
         return False, 'cannot write log %s' % log
     # rtl_tcp spawn options: explicit values here, else the remembered
     # per-dongle ones (None = rtl_tcp default). -f/-s take Hz, -g takes
-    # tenths of dB where 0 means auto — skipped when falsy.
+    # tenths of dB where 0 means auto — skipped when falsy. -P is
+    # signed (0 = no correction, skipped), -b/-n take counts, -T is a
+    # flag, -D takes 0/1/2 where 0 = off, skipped.
     with _lock:
         remembered = _params.get(did) or {}
     if freq is _UNSET:
@@ -641,6 +676,16 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
         rate = remembered.get('rate')
     if gain is _UNSET:
         gain = remembered.get('gain')
+    if ppm is _UNSET:
+        ppm = remembered.get('ppm')
+    if buffers is _UNSET:
+        buffers = remembered.get('buffers')
+    if buflen is _UNSET:
+        buflen = remembered.get('buflen')
+    if biastee is _UNSET:
+        biastee = remembered.get('biastee')
+    if ds is _UNSET:
+        ds = remembered.get('ds')
     opts = []
     if freq:
         opts += ['-f', str(int(freq))]
@@ -648,6 +693,16 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
         opts += ['-s', str(int(rate))]
     if gain:
         opts += ['-g', str(int(gain))]
+    if ppm:
+        opts += ['-P', str(int(ppm))]
+    if buffers:
+        opts += ['-b', str(int(buffers))]
+    if buflen:
+        opts += ['-n', str(int(buflen))]
+    if biastee:
+        opts += ['-T']
+    if ds:
+        opts += ['-D', str(ds)]
     argv = ['rtl_tcp', '-a', '127.0.0.1', '-p', str(iport),
             '-d', device_selector(d)] + opts
     try:
@@ -676,7 +731,9 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
     with _lock:
         _runtime[did] = entry
         _ports[did] = port
-        _params[did] = {'freq': freq, 'rate': rate, 'gain': gain}
+        _params[did] = {'freq': freq, 'rate': rate, 'gain': gain,
+                        'ppm': ppm, 'buffers': buffers, 'buflen': buflen,
+                        'biastee': biastee, 'ds': ds}
         save_state_locked()
     deadline = time.time() + 3.0
     while time.time() < deadline:
@@ -829,18 +886,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_index()
             elif path == '/dongles.json':
                 self._json(api_state())
+            elif path == '/api':
+                self._serve_api_doc()
             elif path == '/publish':
                 did = (params.get('d') or [''])[0]
                 port = (params.get('port') or [''])[0]
                 if not did:
                     self._json({'success': False, 'message': 'missing dongle id'})
                 else:
-                    # freq/rate/gain: absent → keep remembered, empty or
-                    # invalid → clear it (rtl_tcp default), valid → apply
+                    # all spawn options follow the same rule: absent →
+                    # keep remembered, empty or invalid → clear it
+                    # (rtl_tcp default), valid → apply
                     freq = _to_int(params['freq'][0]) if 'freq' in params else _UNSET
                     rate = _to_int(params['rate'][0]) if 'rate' in params else _UNSET
                     gain = _to_int(params['gain'][0]) if 'gain' in params else _UNSET
-                    ok, msg = publish_dongle(did, port, freq, rate, gain)
+                    ppm = _to_signed(params['ppm'][0]) if 'ppm' in params else _UNSET
+                    buffers = _to_int(params['buffers'][0]) if 'buffers' in params else _UNSET
+                    buflen = _to_int(params['buflen'][0]) if 'buflen' in params else _UNSET
+                    biastee = _to_bool(params['biastee'][0]) if 'biastee' in params else _UNSET
+                    ds = _to_ds(params['ds'][0]) if 'ds' in params else _UNSET
+                    ok, msg = publish_dongle(did, port, freq, rate, gain,
+                                             ppm, buffers, buflen, biastee, ds)
                     self._json({'success': ok, 'message': msg})
             elif path == '/stop':
                 did = (params.get('d') or [''])[0]
@@ -872,6 +938,21 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_api_doc(self):
+        """API.md as text/markdown — the machine-facing API docs."""
+        try:
+            with open(API_FILE, 'rb') as f:
+                body = f.read()
+        except OSError:
+            self._json({'success': False, 'message': 'API.md missing'}, 500)
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/markdown; charset=utf-8')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
