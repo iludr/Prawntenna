@@ -459,6 +459,14 @@ def _detach_listener(rt):
         lsock = rt.get('listener')
         rt['listener'] = None
     if lsock is not None:
+        # shutdown (not just close) wakes a thread blocked in accept()/
+        # poll() on this socket at once — close alone leaves the port
+        # bound until the loop's next poll tick. Unsupported on some
+        # platforms (Windows listening sockets) — ignored there.
+        try:
+            lsock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         _close_sock(lsock)
 
 
