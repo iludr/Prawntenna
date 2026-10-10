@@ -579,6 +579,20 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET):
             if other != did and rt.get('port') == port and entry_alive(rt):
                 return False, ('port %d already publishes dongle %s'
                                % (port, other))
+        # reap dead entries holding the port: their rtl_tcp is gone
+        # (crashed or the dongle was unplugged) and only their listener
+        # socket still binds the port. An unplugged dongle is never
+        # enumerated again, so nothing else would ever free it — the
+        # user asking for the port wins over auto-republish.
+        stale = [other for other, rt in _runtime.items()
+                 if other != did and rt.get('port') == port
+                 and not entry_alive(rt)]
+        for other in stale:
+            rt = _runtime.pop(other, None)
+            if rt is not None and rt.get('listener'):
+                _close_sock(rt['listener'])
+        if stale:
+            save_state_locked()
         old = _runtime.get(did)
     # same port: keep the listener (and its proxy thread); only the
     # rtl_tcp child behind it is replaced
