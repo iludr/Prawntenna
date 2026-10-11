@@ -386,6 +386,9 @@ def stream_watchdog():
             except OSError:
                 continue
             rt['error'] = why
+        if victims:
+            with _lock:
+                save_state_locked()   # dead entries must not persist
 
 
 def _proc_state(stat):
