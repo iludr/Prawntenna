@@ -110,6 +110,9 @@ or rtl_tcp failed to start (its log tail is returned).
 
 Stops the rtl_tcp spawned for this dongle and releases its port. The
 dongle stays stopped — nothing republishes it automatically.
+If the rtl_tcp is wedged in an uninterruptible USB call it can ignore
+even SIGKILL; the port is still released, and the response names the
+stuck pid — replug the dongle (or reboot the host) to clear it.
 
 ### `GET /scan?d=ID` — deep-scan a dongle
 
@@ -156,6 +159,15 @@ Runtime commands always override the spawn options set via `/publish`.
   client sees a clean disconnect), the dongle shows up as not
   `published` with the reason in `error` — and it stays that way until
   a client republishes it.
+- A dongle that drops off the USB bus (cable/power glitch) leaves its
+  rtl_tcp wedged: still listening, holding the dongle and its public
+  port. The watchdog kills it within ~15 s of the dongle
+  disappearing and frees the port for a later republish; the reason
+  is in `error`. Republishing before the dongle is back fails with
+  `dongle not found`.
+- A republish of a dongle whose old rtl_tcp ignored SIGKILL fails
+  with the stuck pid in the message — replug the dongle or reboot
+  the host, then publish again.
 - Deliberately stopped dongles (`/stop`) also stay stopped forever;
   nothing brings them back but an explicit `/publish`.
 - Recommended client loop: connect → on disconnect, retry with

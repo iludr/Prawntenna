@@ -52,6 +52,7 @@ _params = {}    # dongle id -> rtl_tcp spawn options last chosen by the
 _runtime = {}   # dongle id -> {'proc': Popen|None, 'pid', 'port', 'error', 'log'}
 _scanning = set()
 _scan_ts = {}       # dongle id -> time of the last deep-scan attempt (cooldown)
+_missing = {}       # dongle id -> first time seen absent from the USB bus
 
 # Sentinel for "argument not given": publish_dongle then reuses the
 # remembered per-dongle option instead of clearing it (None would).
@@ -341,19 +342,42 @@ def stream_watchdog():
     """
     while True:
         time.sleep(5)
+        # enumerate outside _lock: the probe can take seconds
+        dongles = enumerate_dongles()
+        present = ({dongle_id(d) for d in dongles}
+                   if dongles is not None else None)
         victims = []
         with _lock:
             now = time.time()
             for did, rt in _runtime.items():
                 if not entry_alive(rt):
+                    _missing.pop(did, None)
                     continue
                 stalled = (rt.get('client') is not None
                            and now - rt.get('iq_ts', 0) > 10)
                 deaf = (now - rt.get('born', 0) > 15
                         and not tcp_listening(rt.get('iport') or 0))
+                # a wedged rtl_tcp keeps its listening socket and
+                # has no client, so stalled/deaf never fire once
+                # the dongle drops off the USB bus — and its entry
+                # then blocks the public port forever. Kill it once
+                # the dongle has been gone for 10 s (a single missed
+                # enumeration is not proof of anything). The dead
+                # entry's listener keeps the port rebindable for a
+                # republish when the dongle returns.
+                if present is None:
+                    _missing.pop(did, None)   # probe failed: kill nothing
+                elif did in present:
+                    _missing.pop(did, None)
+                elif now - _missing.setdefault(did, now) > 10:
+                    victims.append((did, rt, 'dongle left the USB bus — '
+                                            'rtl_tcp killed (republish '
+                                            'when it is back)'))
+                    continue
                 if stalled or deaf:
-                    victims.append((did, rt))
-        for did, rt in victims:
+                    victims.append((did, rt, 'rtl_tcp stalled — killed '
+                                            '(republish to restart)'))
+        for did, rt, why in victims:
             try:
                 if rt.get('proc') is not None:
                     rt['proc'].kill()
@@ -361,12 +385,31 @@ def stream_watchdog():
                     os.kill(rt['pid'], signal.SIGKILL)
             except OSError:
                 continue
-            rt['error'] = 'rtl_tcp stalled — killed (republish to restart)'
+            rt['error'] = why
+
+
+def _proc_state(stat):
+    """Process state field from /proc/<pid>/stat text (None if odd)."""
+    try:
+        return stat.rpartition(')')[2].split()[0]
+    except IndexError:
+        return None
 
 
 def pid_alive(pid):
-    """POSIX-only liveness probe (pid adoption is a /proc feature)."""
-    return bool(pid) and os.path.isdir('/proc/%d' % pid)
+    """POSIX-only liveness probe (pid adoption is a /proc feature).
+
+    A zombie is not alive: its port and USB device are already
+    released, only the pid lingers until reaped. Counting it as
+    alive would block its port forever."""
+    if not pid or not os.path.isdir('/proc/%d' % pid):
+        return False
+    try:
+        with open('/proc/%d/stat' % pid, 'r') as f:
+            state = _proc_state(f.read())
+    except OSError:
+        return True   # cannot tell: fall back to the directory check
+    return state != 'Z' if state else True
 
 
 def entry_alive(rt):
@@ -546,27 +589,52 @@ def _proxy_loop(entry):
 
 
 def kill_entry(rt):
+    """Kill a published rtl_tcp (own child or adopted pid).
+
+    Returns True if it died, False if it ignored even SIGKILL —
+    a process wedged in an uninterruptible USB syscall. Such a
+    process keeps its hold on the dongle until the dongle is
+    replugged or the host reboots; callers must tell the user
+    instead of spawning a replacement that cannot claim the
+    device."""
     proc = rt.get('proc')
     if proc is not None:
-        proc.terminate()
+        try:
+            proc.terminate()
+        except OSError:
+            pass
         try:
             proc.wait(3)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(3)
-    elif rt.get('pid'):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(3)
+            except subprocess.TimeoutExpired:
+                pass   # wedged: even SIGKILL has no effect yet
+        return not entry_alive(rt)
+    if rt.get('pid'):
+        pid = rt['pid']
         try:
-            os.kill(rt['pid'], signal.SIGTERM)
+            os.kill(pid, signal.SIGTERM)
         except OSError:
-            return
+            return not pid_alive(pid)
         for _ in range(30):
-            if not pid_alive(rt['pid']):
-                return
+            if not pid_alive(pid):
+                return True
             time.sleep(0.1)
         try:
-            os.kill(rt['pid'], signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
+        for _ in range(30):
+            if not pid_alive(pid):
+                return True
+            time.sleep(0.1)
+        return not pid_alive(pid)
+    return True
 
 
 def stop_dongle(did):
@@ -576,10 +644,15 @@ def stop_dongle(did):
     if rt is None:
         return False, 'dongle not published'
     _detach_listener(rt)  # closes the listener, ends the proxy accept loop
-    kill_entry(rt)
+    died = kill_entry(rt)
     with _lock:
         _runtime.pop(did, None)
         save_state_locked()
+    if not died:
+        return True, ('rtl_tcp (pid %d) ignored SIGKILL — wedged on USB; '
+                      'the port is released, but the process keeps its '
+                      'hold on the dongle until it is replugged or the '
+                      'host is rebooted' % rt['pid'])
     return True, 'rtl_tcp stopped (port %d released)' % rt['port']
 
 
@@ -651,7 +724,11 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
             return False, ('port %d is already in use on this host '
                            '(another rtl_tcp or service)' % port)
     if old is not None:
-        kill_entry(old)
+        if not kill_entry(old):
+            return False, ('previous rtl_tcp (pid %d) ignored SIGKILL — '
+                           'wedged on USB. Unplug and replug the dongle '
+                           '(or reboot the host), then publish again'
+                           % old.get('pid'))
         if reuse is None:
             _detach_listener(old)  # port change: old listener goes
     # free loopback port for rtl_tcp itself
