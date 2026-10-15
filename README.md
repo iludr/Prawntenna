@@ -23,7 +23,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now prawntenna
 ### HTTPS front (example domain: prawntenna.example.com)
 
 nginx proxies port 80/443 (with a Let's Encrypt certificate) to the app
-on 127.0.0.1:8080:
+on 127.0.0.1:8080. Mounting it under a subpath (here `/prawntenna/`)
+keeps the host root free for other services; the dashboard uses only
+relative URLs, so it works under any prefix:
 
 ```bash
 sudo tee /etc/nginx/sites-available/prawntenna <<'EOF'
@@ -31,8 +33,9 @@ server {
     listen 80;
     listen [::]:80;
     server_name prawntenna.example.com;
-    location / {
-        proxy_pass http://127.0.0.1:8080;
+    location = /prawntenna { return 301 /prawntenna/; }
+    location /prawntenna/ {
+        proxy_pass http://127.0.0.1:8080/;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;

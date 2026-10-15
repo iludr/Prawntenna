@@ -393,7 +393,9 @@
                 // is converted — all three are always sent so the user can
                 // also remove a remembered option via the UI
                 const f = parseFloat(c.freq.value), r = parseFloat(c.rate.value), g = parseFloat(c.gain.value);
-                const qs = '/publish?d=' + encodeURIComponent(id) + '&port=' + port +
+                // relative paths: the dashboard also works behind a
+                // reverse proxy that mounts it under a subpath
+                const qs = 'publish?d=' + encodeURIComponent(id) + '&port=' + port +
                     '&freq=' + (isFinite(f) ? Math.round(f * 1e6) : '') +
                     '&rate=' + (isFinite(r) ? Math.round(r * 1000) : '') +
                     '&gain=' + (isFinite(g) ? Math.round(g * 10) : '');
@@ -416,7 +418,7 @@
 
         async function stopDongle(id) {
             try {
-                const res = await fetch('/stop?d=' + encodeURIComponent(id));
+                const res = await fetch('stop?d=' + encodeURIComponent(id));
                 const data = await res.json();
                 if (data.success) toast(data.message || 'Stopped');
                 else toast('Stop failed: ' + (data.message || 'unknown error'), true);
@@ -430,7 +432,7 @@
             c.scan.disabled = true;
             c.scanState.textContent = 'scanning...';
             try {
-                const res = await fetch('/scan?d=' + encodeURIComponent(id));
+                const res = await fetch('scan?d=' + encodeURIComponent(id));
                 const data = await res.json();
                 if (data.success) toast('Device details scanned');
                 else toast('Scan failed: ' + (data.message || 'unknown error'), true);
@@ -446,7 +448,7 @@
 
         async function poll() {
             try {
-                const res = await fetch('/dongles.json');
+                const res = await fetch('dongles.json');
                 const data = await res.json();
                 if (data.success) render(data);
             } catch (e) { /* keep last state on transient failures */ }

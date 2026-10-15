@@ -6,7 +6,10 @@ HTTP control API — it is written for both humans and AI agents
 implementing client software (e.g. an automated satellite receiver).
 The running server also serves this file at `GET /api`.
 
-All examples assume the manager runs on `http://HOST:8080/`.
+All examples assume the manager runs on `http://HOST:8080/`. When a
+reverse proxy mounts it under a subpath (e.g. the public deployment at
+`https://prawntenna2.derusi.de/prawntenna/`), the same endpoint paths
+apply relative to that prefix.
 
 ## Conventions
 
