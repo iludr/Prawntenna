@@ -61,8 +61,25 @@ _UNSET = object()
 
 # ---------- dongle enumeration ----------
 
-def enumerate_dongles():
-    """List connected dongles: [] if none, None if rtl-sdr tools missing."""
+# The dashboard polls every few seconds and the watchdog loops every
+# 5 s; without a cache each of those spawns a fresh rtl_test probe.
+# A short TTL coalesces them into one probe every _ENUM_TTL seconds.
+# Callers that must see the bus right now (publish, deep scan) pass
+# fresh=True to bypass the cache.
+_ENUM_TTL = 5.0
+_enum_lock = threading.Lock()
+_enum_ts = 0.0
+_enum_cached = None
+
+def enumerate_dongles(fresh=False):
+    """List connected dongles: [] if none, None if rtl-sdr tools missing.
+
+    Served from a _ENUM_TTL-second cache unless fresh is True."""
+    global _enum_ts, _enum_cached
+    with _enum_lock:
+        if (not fresh and _enum_cached is not None
+                and time.time() - _enum_ts < _ENUM_TTL):
+            return _enum_cached
     try:
         p = subprocess.run(ENUM_PROBE, capture_output=True, timeout=5)
         text = (p.stdout + p.stderr).decode('utf-8', 'replace')
@@ -77,6 +94,9 @@ def enumerate_dongles():
         name = re.sub(r',?\s*SN:?\s*\S+\s*$', '', desc).strip().strip(',')
         dongles.append({'index': int(m.group(1)), 'name': name,
                         'serial': sn.group(1) if sn else None})
+    with _enum_lock:
+        _enum_ts = time.time()
+        _enum_cached = dongles
     return dongles
 
 
@@ -267,7 +287,7 @@ def deep_scan(did):
     Read-only — but the dongle must be free (not held by rtl_tcp or any
     other SDR program). Results are cached in _meta (persisted).
     """
-    dongles = enumerate_dongles() or []
+    dongles = enumerate_dongles(fresh=True) or []
     d = next((x for x in dongles if dongle_id(x) == did), None)
     if d is None:
         return False, 'dongle not found — unplugged?'
@@ -680,7 +700,7 @@ def publish_dongle(did, port, freq=_UNSET, rate=_UNSET, gain=_UNSET,
     callers) reuses the remembered per-dongle value, None clears it
     (rtl_tcp default), a value applies and remembers it.
     """
-    dongles = enumerate_dongles()
+    dongles = enumerate_dongles(fresh=True)
     if dongles is None:
         return False, 'rtl-sdr tools not found on this host'
     d = next((x for x in dongles if dongle_id(x) == did), None)
