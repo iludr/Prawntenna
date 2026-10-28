@@ -515,9 +515,11 @@ def _detach_listener(rt):
 # rtl_tcp client commands: 1 byte id + uint32 big-endian parameter.
 # rtl_tcp itself never reports its state back — parsing the command
 # stream on the way through is the only way to know the tune settings.
-_CMD_KEYS = {0x00: 'ppm', 0x01: 'freq_hz', 0x02: 'rate_hz',
-             0x03: 'gain_mode', 0x04: 'gain_tenth_db', 0x05: 'if_gain',
-             0x07: 'agc', 0x08: 'direct_sampling', 0x09: 'offset_tuning'}
+_CMD_KEYS = {0x01: 'freq_hz', 0x02: 'rate_hz', 0x03: 'gain_mode',
+             0x04: 'gain_tenth_db', 0x05: 'freq_correction', 0x06: 'if_gain',
+             0x07: 'test_mode', 0x08: 'agc', 0x09: 'direct_sampling',
+             0x0a: 'offset_tuning', 0x0b: 'rtl_xtal', 0x0c: 'tuner_xtal',
+             0x0d: 'set_gain_by_index', 0x0e: 'bias_tee'}
 
 
 def _relay(src, dst, entry, parse_cmds):
