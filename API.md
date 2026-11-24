@@ -66,6 +66,8 @@ Per-dongle entry:
 | `usb` | USB descriptor info from sysfs |
 | `meta` | deep-scan results: tuner, gains, eeprom, ... |
 | `scanning` | `true` while a deep-scan is running |
+| `antenna_form` | antenna type entered for this dongle (see below), else `null` |
+| `antenna_tuned_mhz` | tuned frequency in MHz entered for this dongle (see below), else `null` |
 
 `tune` keys (updated live as the connected client sends rtl_tcp
 commands): `ppm`, `freq_hz`, `rate_hz`, `gain_mode`, `gain_tenth_db`,
@@ -147,6 +149,11 @@ An unknown or unconfigured dongle id answers
 `success: true` and treat `success: false` — like a 404 from an older
 manager without these endpoints — as "not configured" (`null`). Values
 may change at runtime; clients re-poll on every (re)registration.
+
+The same two values are also carried per dongle in `/dongles.json` as
+`antenna_form` / `antenna_tuned_mhz`, so a poller can read them together
+with the rest of the state in one request; the standalone endpoints
+exist so each value can also be fetched (and deployed) independently.
 
 ### `GET /antenna_set?d=ID[&form=STR][&tuned_mhz=MHZ]` — set antenna hardware
 

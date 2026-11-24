@@ -37,6 +37,7 @@
         .btn-stop { padding: 3px 10px; background: rgba(231,76,60,0.15); color: #e07890; border: 1px solid #e07890; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 0.9em; }
         .btn-stop:hover { background: rgba(231,76,60,0.3); }
         .num-input { width: 90px; background: #0f3460; border: 1px solid #53d769; color: #e0e0e0; border-radius: 3px; padding: 3px; font-family: monospace; font-size: 0.95em; }
+        .ant-input { width: 150px; background: #0f3460; border: 1px solid #53d769; color: #e0e0e0; border-radius: 3px; padding: 3px; font-family: monospace; font-size: 0.95em; }
         #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%) translateY(20px); background: #16213e; color: #e0e0e0; border: 1px solid #53d769; border-radius: 4px; padding: 8px 14px; font-size: 0.9em; opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none; z-index: 2000; max-width: 90vw; }
         #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
         #toast.error { border-color: #e74c3c; }
@@ -219,6 +220,13 @@
                 '  <button class="btn-outline restart-btn" style="display:none;">↻ Restart</button>' +
                 '  <button class="btn-stop stop-btn" style="display:none;">✕ Stop</button>' +
                 '</div>' +
+                '<div class="dc-controls">' +
+                '  <span class="port-label">antenna</span>' +
+                '  <input class="ant-input ant-form" type="text" maxlength="200" placeholder="v-dipole, moxon, discone, ...">' +
+                '  <span class="port-label">tuned MHz</span>' +
+                '  <input class="num-input ant-mhz" type="number" step="any" min="0" placeholder="127.0">' +
+                '  <button class="btn-outline ant-save">💾 Save</button>' +
+                '</div>' +
                 '<div class="dc-status"></div>' +
                 '<div class="dc-error" style="display:none;"></div>' +
                 '<div class="dc-hint" style="display:none;"></div>' +
@@ -248,6 +256,9 @@
                 sub: card.querySelector('.dc-sub'),
                 freqBadge: card.querySelector('.dc-freq'),
                 port: card.querySelector('.port-input'),
+                antForm: card.querySelector('.ant-form'),
+                antMhz: card.querySelector('.ant-mhz'),
+                antSave: card.querySelector('.ant-save'),
                 freq: card.querySelector('.freq-input'),
                 rate: card.querySelector('.rate-input'),
                 gain: card.querySelector('.gain-input'),
@@ -262,15 +273,20 @@
                 scanState: card.querySelector('.dc-scan-state'),
                 edited: false,
                 pEdited: false,
+                aEdited: false,
             };
             c.port.addEventListener('input', () => { c.edited = true; });
             for (const el of [c.freq, c.rate, c.gain]) {
                 el.addEventListener('input', () => { c.pEdited = true; });
             }
+            for (const el of [c.antForm, c.antMhz]) {
+                el.addEventListener('input', () => { c.aEdited = true; });
+            }
             c.publish.onclick = () => publishDongle(d.id, c);
             c.restart.onclick = () => publishDongle(d.id, c);
             c.stop.onclick = () => stopDongle(d.id, c);
             c.scan.onclick = () => scanDongle(d.id, c);
+            c.antSave.onclick = () => saveAntenna(d.id, c);
             cards[d.id] = c;
             return c;
         }
@@ -286,6 +302,11 @@
             c.freqBadge.textContent = tf ? (tf / 1e6).toFixed(4) + ' MHz' : '';
             c.freqBadge.style.display = tf ? '' : 'none';
             if (!c.edited) c.port.value = d.published ? d.port : (d.remembered_port || d.suggested_port);
+            // antenna prefill: current configured values; empty field = unset
+            if (!c.aEdited) {
+                c.antForm.value = d.antenna_form || '';
+                c.antMhz.value = (d.antenna_tuned_mhz != null) ? d.antenna_tuned_mhz : '';
+            }
             // spawn options prefill: remembered params, converted to the
             // field units (MHz / kS/s / dB); empty = rtl_tcp default
             if (!c.pEdited) {
@@ -425,6 +446,32 @@
             } catch (e) {
                 toast('Stop failed: server unreachable', true);
             }
+            poll();
+        }
+
+        async function saveAntenna(id, c) {
+            // both fields are always sent: empty clears the stored value
+            // (same tri-state rule as the /publish options)
+            const mhz = parseFloat(c.antMhz.value);
+            const qs = 'antenna_set?d=' + encodeURIComponent(id) +
+                '&form=' + encodeURIComponent(c.antForm.value.trim()) +
+                '&tuned_mhz=' + (isFinite(mhz) && mhz > 0 ? mhz : '');
+            c.antSave.disabled = true;
+            try {
+                const res = await fetch(qs);
+                const data = await res.json();
+                if (data.success) {
+                    toast('Antenna saved for ' + id +
+                        (data.antenna_form ? ' — ' + data.antenna_form : '') +
+                        (data.tuned_mhz != null ? ' @ ' + data.tuned_mhz + ' MHz' : ''));
+                    c.aEdited = false;
+                } else {
+                    toast('Save failed: ' + (data.message || 'unknown error'), true);
+                }
+            } catch (e) {
+                toast('Save failed: server unreachable', true);
+            }
+            c.antSave.disabled = false;
             poll();
         }
 

@@ -1019,6 +1019,7 @@ def api_state():
                 if rt is not None and not published:
                     error = rt.get('error') or ''
                 meta = dict(_meta.get(did) or {})
+                ant = _antenna.get(did) or {}
                 spawn_opts = (rt or {}).get('spawn_opts', '')
                 remembered_params = dict(_params.get(did) or {})
             if published and 'tuner' not in meta:
@@ -1041,7 +1042,9 @@ def api_state():
                         'remembered_params': remembered_params,
                         'spawn_opts': spawn_opts,
                         'usb': usb_sysfs_meta(d['serial']),
-                        'meta': meta, 'scanning': scanning})
+                        'meta': meta, 'scanning': scanning,
+                        'antenna_form': ant.get('antenna_form'),
+                        'antenna_tuned_mhz': ant.get('tuned_mhz')})
     return {'success': True, 'dongles': out, 'tools': tools,
             'bind': RTL_BIND,
             'host': {'name': socket.gethostname(), 'ips': lan_ips(),
