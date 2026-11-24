@@ -33,6 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_FILE = os.path.join(BASE_DIR, 'index.html')
 API_FILE = os.path.join(BASE_DIR, 'API.md')
 STATE_FILE = os.path.join(BASE_DIR, 'dongles.json')
+ANTENNA_FILE = os.path.join(BASE_DIR, 'antenna.json')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 WEB_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 RTL_BIND = '0.0.0.0'
@@ -53,6 +54,10 @@ _runtime = {}   # dongle id -> {'proc': Popen|None, 'pid', 'port', 'error', 'log
 _scanning = set()
 _scan_ts = {}       # dongle id -> time of the last deep-scan attempt (cooldown)
 _missing = {}       # dongle id -> first time seen absent from the USB bus
+_antenna = {}       # dongle id -> {'antenna_form': str|None, 'tuned_mhz': float|None}
+                    # (persisted in antenna.json) — operator-entered hardware
+                    # facts about the antenna on each dongle, not derivable
+                    # from the dongle itself
 
 # Sentinel for "argument not given": publish_dongle then reuses the
 # remembered per-dongle option instead of clearing it (None would).
@@ -177,6 +182,18 @@ def _to_ds(v):
         return n if n in (0, 1, 2) else None
     except (TypeError, ValueError):
         return None
+
+
+def _to_mhz(v):
+    """HTTP query value -> positive finite float (MHz); None otherwise.
+
+    NaN compares False against everything, so the chained comparison
+    also rejects NaN and +-inf."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if 0.0 < f < float('inf') else None
 
 
 def port_available(port):
@@ -467,6 +484,53 @@ def save_state_locked():
                        'meta': _meta, 'params': _params}, f, indent=2)
     except OSError:
         pass
+
+
+# ---------- antenna hardware config ----------
+
+def load_antenna():
+    """Load antenna.json: dongle id -> {'antenna_form', 'tuned_mhz'}.
+
+    Missing or malformed file just means "nothing configured" — the
+    /antenna_* lookups then answer success:false, which clients read
+    as null."""
+    global _antenna
+    try:
+        with open(ANTENNA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    clean = {}
+    for did, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        form = entry.get('antenna_form')
+        mhz = entry.get('tuned_mhz')
+        if isinstance(mhz, bool) or not isinstance(mhz, (int, float)):
+            mhz = None
+        elif not 0.0 < mhz < float('inf'):
+            mhz = None
+        clean[str(did)] = {'antenna_form': form if isinstance(form, str) else None,
+                           'tuned_mhz': mhz}
+    _antenna = clean
+
+
+def save_antenna_locked():
+    """Caller must hold _lock. Persists antenna.json."""
+    try:
+        with open(ANTENNA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_antenna, f, indent=2)
+    except OSError:
+        pass
+
+
+def antenna_entry(did):
+    """Configured antenna entry for a dongle id (None if unconfigured)."""
+    with _lock:
+        entry = _antenna.get(did)
+        return dict(entry) if entry is not None else None
 
 
 # ---------- publish / stop ----------
@@ -1038,6 +1102,47 @@ class Handler(BaseHTTPRequestHandler):
                                             else ('dongle is busy — held by another '
                                                   'process, stop it first' if msg == 'busy'
                                                   else msg))})
+            elif path in ('/antenna_form', '/antenna_tuned'):
+                # Two independent endpoints (deployable separately): the
+                # antenna hardware facts of one dongle, from antenna.json.
+                # Unknown/unconfigured id -> success:false; clients read
+                # that (or a 404 from an older manager) as "null".
+                did = (params.get('d') or [''])[0].strip()[:64]
+                if not did:
+                    self._json({'success': False, 'message': 'missing dongle id'})
+                else:
+                    entry = antenna_entry(did)
+                    if entry is None:
+                        self._json({'success': False,
+                                    'message': 'no antenna configured for dongle %s' % did})
+                    elif path == '/antenna_form':
+                        self._json({'success': True,
+                                    'antenna_form': entry.get('antenna_form')})
+                    else:
+                        self._json({'success': True,
+                                    'tuned_mhz': entry.get('tuned_mhz')})
+            elif path == '/antenna_set':
+                did = (params.get('d') or [''])[0].strip()[:64]
+                if not did:
+                    self._json({'success': False, 'message': 'missing dongle id'})
+                else:
+                    # same tri-state rule as the /publish options: absent
+                    # param keeps the stored value, empty/invalid clears
+                    # it (null), a valid value is stored
+                    with _lock:
+                        entry = dict(_antenna.get(did)
+                                     or {'antenna_form': None, 'tuned_mhz': None})
+                        if 'form' in params:
+                            form = params['form'][0].strip()[:200]
+                            entry['antenna_form'] = form or None
+                        if 'tuned_mhz' in params:
+                            entry['tuned_mhz'] = _to_mhz(params['tuned_mhz'][0])
+                        _antenna[did] = entry
+                        save_antenna_locked()
+                    self._json({'success': True,
+                                'message': 'antenna saved for dongle %s' % did,
+                                'antenna_form': entry['antenna_form'],
+                                'tuned_mhz': entry['tuned_mhz']})
             else:
                 self._json({'success': False, 'message': 'not found'}, 404)
         except Exception as e:  # a broken request must not kill the server
@@ -1090,6 +1195,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     saved = load_state()
+    load_antenna()
     threading.Thread(target=startup_restore, args=(saved,), daemon=True).start()
     threading.Thread(target=stream_watchdog, daemon=True).start()
     httpd = ThreadingHTTPServer(('0.0.0.0', WEB_PORT), Handler)

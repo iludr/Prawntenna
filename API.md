@@ -24,6 +24,8 @@ apply relative to that prefix.
   start itself.
 - Port, spawn options and scan results are remembered per dongle in
   `dongles.json` and survive restarts of the manager or the host.
+- Antenna hardware facts (antenna form, tuned frequency) are remembered
+  per dongle in `antenna.json` on the manager host and survive restarts.
 
 ## Endpoints
 
@@ -124,6 +126,42 @@ works while the dongle is **not** held by an rtl_tcp or other SDR
 software — stop it first. Results appear in `dongles.json` under
 `meta`. Idle dongles are scanned automatically once; `scanning` in the
 state shows a scan in progress.
+
+### `GET /antenna_form?d=ID` and `GET /antenna_tuned?d=ID` — antenna hardware
+
+Operator-entered hardware facts per dongle (stored in `antenna.json` on
+the manager host — not derivable from the dongle). Clients poll these at
+dongle registration and again when a capture thread connects, since the
+manager may have come up later. The two endpoints are independent and
+may be deployed separately:
+
+- `GET /antenna_form?d=ID` → `{"success": true, "antenna_form": "v-dipole"}`
+  — `antenna_form` is a free-form string ("v-dipole", "moxon",
+  "discone", ...), `null` when unset
+- `GET /antenna_tuned?d=ID` → `{"success": true, "tuned_mhz": 127.0}`
+  — `tuned_mhz` is a float, the frequency in MHz the antenna is cut or
+  tuned for, `null` when unset
+
+An unknown or unconfigured dongle id answers
+`{"success": false, "message": "..."}`; clients read only the value on
+`success: true` and treat `success: false` — like a 404 from an older
+manager without these endpoints — as "not configured" (`null`). Values
+may change at runtime; clients re-poll on every (re)registration.
+
+### `GET /antenna_set?d=ID[&form=STR][&tuned_mhz=MHZ]` — set antenna hardware
+
+Stores the values in `antenna.json` (survives restarts of the manager
+and the host). Not called by receiver software — humans/tools only. The
+same tri-state rule as the `/publish` options applies per parameter:
+**absent** keeps the stored value, **empty or invalid** clears it
+(`null`), a **valid value** is stored.
+
+```
+curl "http://HOST:8080/antenna_set?d=00000002&form=v-dipole&tuned_mhz=127.0"
+curl "http://HOST:8080/antenna_set?d=00000002&tuned_mhz="    # clear tuned_mhz
+```
+
+→ `{"success": true, "message": "...", "antenna_form": "v-dipole", "tuned_mhz": 127.0}`
 
 ### `GET /api` — this document
 

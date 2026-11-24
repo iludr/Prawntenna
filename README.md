@@ -71,6 +71,11 @@ the router's IPv6 prefix ever changes (see `EVENTLOG`-style ops notes).
   `dongles.json`. If Prawntenna (or the machine) restarts while dongles
   are published, the surviving `rtl_tcp` processes are re-adopted by pid
   and otherwise restarted automatically.
+- **Antenna hardware** — `GET /antenna_form?d=ID` and
+  `GET /antenna_tuned?d=ID` serve the operator-entered antenna facts of
+  each dongle (stored per dongle in `antenna.json`, set via
+  `GET /antenna_set?d=ID&form=...&tuned_mhz=...`), so network receivers
+  can show which antenna is on which dongle and what it is tuned for.
 - **Safety** — Prawntenna only manages processes it started or adopted.
   System rtl_tcp daemons (like a permanently running port 1234 service)
   are never touched; their dongle simply reports "busy" if you try to

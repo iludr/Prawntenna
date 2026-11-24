@@ -1,4 +1,6 @@
-# rtl_tcp state (remembered ports, adopted pids) and runtime logs
+# rtl_tcp state (remembered ports, adopted pids), antenna hardware
+# config and runtime logs — all per-host, seeded locally
 dongles.json
+antenna.json
 logs/
 __pycache__/
